@@ -12,12 +12,17 @@ enum Brain {
     static let personality = """
     You are Brick, a friendly little brick person who lives on a kid's computer screen. \
     The kid loves building Minecraft mods and is very good at knowing what they want things to do. \
-    Talk in short, simple, friendly sentences, two at most, with plain words. \
+    Talk in short, simple, friendly sentences, three at most, with plain words. \
+    You can look things up on the internet with web search, so use it whenever the kid asks about \
+    facts, news, games, Minecraft, how things work, or anything you are not sure about. \
+    Then answer in your own simple words. Never read out web addresses. \
+    Only use kid-friendly sources, and if a search turns up something scary or too grown-up, skip it. \
     Be fun, curious and encouraging. You love building things, and you make the odd brick joke. \
     Never ask for or repeat private things like a last name, school, town, address, phone number, \
     email or passwords. If the kid shares something like that, kindly say that is one for a grown-up. \
     If anything gets scary, mean or too grown-up, gently change the subject and say a grown-up can help. \
-    You can't see the screen and you can't control the computer, so don't pretend you can.
+    You can't see the screen and you can't control the computer, so don't pretend you can. \
+    If you can't find something out, say so honestly instead of guessing.
     """
 
     /// The key comes from the environment, or from the login Keychain (see set-key.sh).
@@ -38,31 +43,46 @@ enum Brain {
         return key.isEmpty ? nil : key
     }
 
+    /// Pulls Brick's words out of Claude's answer. When he searched the web, the answer is mixed in with
+    /// the search steps, so only the words after the last search result count.
+    static func answer(from json: [String: Any]) -> String? {
+        guard let content = json["content"] as? [[String: Any]] else { return nil }
+        var words = ""
+        for block in content {
+            switch block["type"] as? String {
+            case "web_search_tool_result": words = ""
+            case "text": words += (block["text"] as? String) ?? ""
+            default: break
+            }
+        }
+        let line = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        return line.isEmpty ? nil : line
+    }
+
     /// Asks Claude for Brick's next line. `done` gets nil if anything goes wrong.
     static func reply(to messages: [[String: String]], key: String, done: @escaping (String?) -> Void) {
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         request.httpMethod = "POST"
-        request.timeoutInterval = 30
+        request.timeoutInterval = 60   // looking things up on the web takes a moment
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         let body: [String: Any] = [
             "model": model,
-            "max_tokens": 200,
+            "max_tokens": 600,
             "system": personality,
             "messages": messages,
+            // Brick's window on the internet. Claude searches the web itself, a few times at most.
+            "tools": [["type": "web_search_20250305", "name": "web_search", "max_uses": 3]],
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         URLSession.shared.dataTask(with: request) { data, _, _ in
             var text: String?
-            if let data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let content = json["content"] as? [[String: Any]],
-               let line = content.first?["text"] as? String {
-                text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                text = answer(from: json)
             }
-            DispatchQueue.main.async { done(text?.isEmpty == false ? text : nil) }
+            DispatchQueue.main.async { done(text) }
         }.resume()
     }
 }
